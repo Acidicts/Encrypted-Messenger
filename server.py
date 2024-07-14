@@ -1,58 +1,80 @@
 import socket
 import threading
 from cryptography.fernet import Fernet
-import json
+import logging
+import base64
 
+# Setup basic logging
+logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
+
+clients = {}
 client_keys = {}
+dict_lock = threading.Lock()
 
-def generate_key():
-    return Fernet.generate_key()
-
-def broadcast_keys(new_client_key, addr, clients):
-    """
-    Broadcasts the new client's key to all other connected clients except the new client itself.
-    """
-    for client_addr, client_socket in clients.items():
-        if client_addr != addr:  # Exclude the new client
-            try:
-                # Serialize the new client's key and address
-                key_info = json.dumps({str(addr): new_client_key.decode('utf-8')})
-                client_socket.send(key_info.encode('utf-8'))
-            except Exception as e:
-                print(f"Error broadcasting new client key to {client_addr}: {e}")
-
-def handle_client(client_socket, addr, clients):
-    clients[addr] = client_socket
-    client_key = generate_key()
-    client_keys[addr] = client_key
-    broadcast_keys(client_key, addr, clients)
+def handle_client(client_socket, addr):
+    global clients, client_keys
     try:
+        # Receive the encoded key from the client
+        encoded_client_key = client_socket.recv(4096)
+        if encoded_client_key:
+            # Decode the key to its original format
+            client_key = base64.urlsafe_b64decode(encoded_client_key)
+            with dict_lock:
+                client_keys[addr] = client_key
+                clients[addr] = client_socket
+            logging.info(f"Client {addr} connected and key stored.")
+        else:
+            logging.error(f"No key received from {addr}.")
+            return
+
         while True:
-            try:
-                message = client_socket.recv(1024).decode('utf-8')
-                if message:  # Check if message is not empty
-                    broadcast_message(message, addr, clients)  # Broadcast received message
-            except ConnectionAbortedError:
-                print(f"Connection with {addr} aborted.")
-                break
-            except Exception as e:
-                print(f"Unexpected error with {addr}: {e}")
-                break
+            encrypted_message = client_socket.recv(4096)
+            if encrypted_message:
+                logging.debug(f"Message received from {addr}.")
+                fernet = Fernet(client_keys[addr])
+                decrypted_message = fernet.decrypt(encrypted_message)
+                broadcast_message(decrypted_message, addr)
+            else:
+                logging.error(f"No message received from {addr}.")
+    except Exception as e:
+        logging.error(f"Error with {addr}: {e}")
     finally:
-        client_socket.close()
-        del clients[addr]
-        del client_keys[addr]
-        print(f"Connection with {addr} closed.")
+        cleanup_connection(addr)
+
+def broadcast_message(message, sender_addr):
+    global clients, client_keys
+    with dict_lock:
+        for addr, client_socket in clients.items():
+            if addr != sender_addr:
+                try:
+                    recipient_key = client_keys[addr]
+                    fernet = Fernet(recipient_key)
+                    encrypted_message = fernet.encrypt(message)
+                    client_socket.send(encrypted_message)
+                    logging.debug(f"Message broadcasted to {addr}.")
+                except Exception as e:
+                    logging.error(f"Error broadcasting message to {addr}: {e}")
+                    cleanup_connection(addr)
+
+def cleanup_connection(addr):
+    with dict_lock:
+        if addr in clients:
+            clients[addr].close()
+            del clients[addr]
+            logging.info(f"Connection with {addr} cleaned up.")
+        if addr in client_keys:
+            del client_keys[addr]
+
 def main():
     server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     server.bind(("127.0.0.1", 5500))
     server.listen(5)
-    clients = {}
-    print("Server listening on 127.0.0.1:5500")
+    logging.info("Server listening on 127.0.0.1:5500")
+
     while True:
-        client, addr = server.accept()
-        print(f"Accepted connection from: {addr}")
-        threading.Thread(target=handle_client, args=(client, addr, clients)).start()
+        client_socket, addr = server.accept()
+        logging.info(f"Accepted connection from: {addr}")
+        threading.Thread(target=handle_client, args=(client_socket, addr)).start()
 
 if __name__ == "__main__":
     main()

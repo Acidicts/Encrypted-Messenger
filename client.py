@@ -1,30 +1,47 @@
 import socket
 import threading
-import json
+from cryptography.fernet import Fernet
+import base64
 
-# Step 1: Define other_clients_keys at the global level
-other_clients_keys = {}
-
-def listen_for_messages(client_socket):
-    global other_clients_keys  # Step 3: Use the global keyword
+def listen_for_messages(client_socket, client_key):
+    fernet = Fernet(client_key)
     while True:
-        message = client_socket.recv(4096).decode('utf-8')
-        if message:
-            try:
-                keys = json.loads(message)
-                other_clients_keys.update(keys)
-                print("Updated keys:", other_clients_keys)
-            except json.JSONDecodeError:
-                print("Server response received:", message)
+        try:
+            message = client_socket.recv(4096)
+            if message:
+                decrypted_message = fernet.decrypt(message).decode('utf-8')
+                print(f"\nNew message: {decrypted_message}")
+        except Exception as e:
+            print(f"Error receiving message: {e}")
+            break
+
+def send_messages(client_socket, client_key):
+    fernet = Fernet(client_key)
+    while True:
+        message = input("Enter your message: ")
+        if message == "/exit":
+            break
+        encrypted_message = fernet.encrypt(message.encode('utf-8'))
+        try:
+            client_socket.send(encrypted_message)
+        except OSError as e:
+            print(f"Socket error: {e}")
+            break
 
 def main():
-    client = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    client.connect(("127.0.0.1", 5500))
-    print("Connected to server.")
-    # Step 2: Initialize other_clients_keys as an empty dictionary is already done at the global level
-    threading.Thread(target=listen_for_messages, args=(client,)).start()
-    client.send("request_keys".encode('utf-8'))
-    # Client can now send messages or perform other actions
+    client_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        client_socket.connect(("127.0.0.1", 5500))
+        client_key = Fernet.generate_key()
+        # Encode the key before sending
+        encoded_key = base64.urlsafe_b64encode(client_key)
+        client_socket.send(encoded_key)
+        threading.Thread(target=listen_for_messages, args=(client_socket, client_key)).start()
+        send_messages(client_socket, client_key)
+    except Exception as e:
+        print(f"Connection error: {e}")
+    finally:
+        client_socket.close()
 
 if __name__ == "__main__":
     main()
